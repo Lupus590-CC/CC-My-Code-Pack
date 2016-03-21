@@ -1,0 +1,352 @@
+	
+
+    --# Shell Utility Extended v1.1 - Program to extend/modify Computercraft autocompletion system.
+    --# Made By Wojbie
+    --# http://pastebin.com/iAisZ9VA
+     
+    --#Global Settings
+     
+    --Add fix to type program
+     
+    --Chat suggested usernames. Place all usernames you want suggested in here.
+    --example: local tChatNames = {"Wojbie","Ninja","Spy"}
+    local tChatNames = {}
+    --Pastebin usernames for pastes suggestions. Place all usernames you want suggested in here.
+    --example: local tPastebinNames = {"Wojbie","Ninja","Spy"}
+    local tPastebinNames = {}
+     
+     
+    -- #Support functions
+    local function save(A,B) local file = fs.open(tostring(A),"w") file.write(B) file.close() end
+    local function saveT(A,B) save(A,textutils.serialize(B)) end
+    local function saveTL(A,B) save(A,string.gsub(textutils.serialize(B),"\n%s*","")) end
+     
+    local function get(A) local file = fs.open(tostring(A),"r") if not file then return false end local data = file.readAll() file.close() if data then return data end end
+    local function getT(A) local data = get(A) if data then data = textutils.unserialize(data) end if data then return data end end
+    local function getHttp(A) if not http.checkURL(A) then return false end local file = http.get(A) if not file then return false end local data = file.readAll() file.close() if data then return data end end
+     
+    local function completeMultipleChoice( sText, tOptions, bAddSpaces )
+        local tResults = {}
+        for n=1,#tOptions do
+            local sOption = tOptions[n]
+            if #sOption + (bAddSpaces and 1 or 0) > #sText and string.sub( sOption, 1, #sText ) == sText then
+                local sResult = string.sub( sOption, #sText + 1 )
+                if bAddSpaces then
+                    table.insert( tResults, sResult .. " " )
+                else
+                    table.insert( tResults, sResult )
+                end
+            end
+        end
+        return tResults
+    end
+     
+    local function quoteGuard(sText,tOptions)
+            --detects spaces in autocompleted stuff and adds quotes as needed.
+            --kinda wonky
+            --not gonna use it
+            for i=1,#tOptions do
+                    if tOptions[i]:match("%s") then --space detected activate quote-man
+                            if sText == "" then tOptions[i]='"'..tOptions[i] end
+                            tOptions[i]=tOptions[i]..'"'
+                    end
+            end
+            return tOptions
+    end
+     
+     
+    local function peripherallook(sType,fTest)
+            local result={}
+            peripheral.find(sType,function(sName,tObject) if ( not fTest ) or fTest(sName,tObject) then table.insert(result,sName) end return false end)
+            return result
+    end
+     
+    local function hostnameslook(sProtocol)
+        -- Build list of host IDs
+        local tResults = {}
+            local close=false
+           
+        if not rednet.isOpen() then
+                    for i,k in pairs(rs.getSides()) do
+                            if peripheral.getType( k ) == "modem" then
+                                    rednet.open(k)
+                                    close=k
+                                    break
+                            end
+                    end
+                    if not close then return tResults end
+        end
+     
+        -- Broadcast a lookup packet
+        rednet.broadcast( {
+            sType = "lookup",
+            sProtocol = sProtocol,
+            sHostname = sHostname,
+        }, "dns" )
+     
+        -- Start a timer
+        local timer = os.startTimer( 0.5 )
+     
+        -- Wait for events
+        while true do
+            local event, p1, p2, p3 = os.pullEvent()
+            if event == "rednet_message" then
+                -- Got a rednet message, check if it's the response to our request
+                local nSenderID, tMessage, sMessageProtocol = p1, p2, p3
+                if sMessageProtocol == "dns" and tMessage.sType == "lookup response" then
+                    if tMessage.sProtocol == sProtocol then
+                            table.insert( tResults, tMessage.sHostname )
+                    end
+                end
+            else
+                -- Got a timer event, check it's the end of our timeout
+                if p1 == timer then
+                    break
+                end
+            end
+        end
+     
+            if close then
+                    rednet.close(close)
+            end
+           
+        return tResults
+    end
+     
+    --#Disable autocompletition of rarely used parts/phrases that mess with the lives like xpcall and dofile
+     
+    if textutils.complete("do")[1] == "file(" then --test if not disabled already
+     
+            local limited = {["do"]="file(",["x"]="pcall("}
+           
+            local textutils_complete = textutils.complete
+            textutils.complete = function(sName,tEnv)
+                    if not limited[sName] then
+                            return textutils_complete(sName,tEnv)
+                    else
+                            local ret = textutils_complete(sName,tEnv)
+                            for i=#ret,1,-1 do
+                                    if ret[i] == limited[sName] then table.remove(ret,i) end
+                            end
+                            return ret
+                    end
+            end
+           
+    end
+     
+    --#Shell Completition
+     
+    --Eject implementation --list only disk drives
+     
+    local function completeEject( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+                    return completeMultipleChoice(sText,peripherallook("drive"))
+            end
+    end
+    shell.setCompletionFunction( "rom/programs/eject", completeEject )
+     
+    --Label implementation --list only disk drives
+     
+    local tLabelOptions = { "get", "get ", "set ", "clear", "clear " }
+    local function completeLabel( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice( sText, tLabelOptions )
+        elseif nIndex == 2 then
+            return completeMultipleChoice(sText,peripherallook("drive"))
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/label", completeLabel )
+     
+    --Monitor implementation --list only monitors
+     
+    local function completeMonitor( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice(sText,peripherallook("monitor"), true )
+        elseif nIndex == 2 then
+            return shell.completeProgram( sText )
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/monitor", completeMonitor )
+     
+    --DJ implementation --list only drives with songs inside. Show song name at that side in []
+     
+    local tDJOptions = { "play", "play ", "stop" }
+    local function Audiotest(sName,tObject)
+            return tObject.hasAudio()
+    end
+    local function AddSongName(tList,sText)
+    tOutput = {}
+    for _,k in pairs(tList) do
+            if sText ~= k then
+                    table.insert(tOutput,k.." ["..disk.getAudioTitle(k).."]")
+            end
+    end
+    for _,k in pairs(tList) do
+            table.insert(tOutput,k)
+    end
+    return tOutput
+    end
+    local function completeDJ( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice( sText, tDJOptions )
+        elseif nIndex == 2 and tPreviousText[2] == "play" then
+                    return completeMultipleChoice(sText,AddSongName(peripherallook("drive",Audiotest),sText))
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/fun/dj", completeDJ )
+     
+    --Pastebin implementation -- get website http://pastebin.com/u/..name
+     
+    --<td><img src="/i/t.gif" class="i_p0" title="Public paste, everybody can see this paste." alt="" border="0" /> <a href="/DW3LCC3L">Monitor Mirror v2.1</a></td>
+    --local tPastes={"DW3LCC3L"}
+    --local tNames={["DW3LCC3L"] = "DW3LCC3L [Monitor Mirror v2.1]"}
+    --local tFlatNames = {["DW3LCC3L"] = "Monitor_Mirror_v2.1}
+     
+    --Code to get all the public pastes on Ext-util load.
+    local tPastes = {}
+    local tNames = {}
+    local tFlatNames = {}
+    for _,name in pairs(tPastebinNames) do
+            local site = "http://pastebin.com/u/"..textutils.urlEncode( name )
+            if http.checkURL(site) then
+                    local data = getHttp(site)
+                    if data then
+                            --get pastes from data here.
+                            for i,k in string.gmatch (data, '<td><img src="/i/t.gif" class="i_p0" title="Public paste, everybody can see this paste." alt="" border="0" /> <a href="/(%w+)">(.-)</a></td>') do
+                                    table.insert(tPastes,i)
+                                    tNames[i] = i.." ["..k.."]"
+                                    tFlatNames[i] = string.gsub(k,"%s","_")
+                            end
+                    end
+            end
+    end
+     
+    --Auto Completition Part
+    local function AddPasteName(tList,sText)
+    tOutput = {}
+    for _,k in pairs(tList) do
+            if sText ~= k then
+                    table.insert(tOutput,tNames[k] or k)
+            end
+    end
+    for _,k in pairs(tList) do
+            table.insert(tOutput,tNames[k] and k)
+    end
+    return tOutput
+    end
+     
+    local tPastebinOptions = { "get ", "run ", "put" }
+    local function completePastebin( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice( sText, tPastebinOptions )
+        elseif nIndex == 2 then
+            if tPreviousText[2] == "put" then
+                return fs.complete( sText, shell.dir(), true, false )
+                    elseif tPreviousText[2] == "get" then
+                            return completeMultipleChoice( sText, AddPasteName(tPastes,sText), true)
+                    elseif tPreviousText[2] == "run" then
+                            return completeMultipleChoice( sText, AddPasteName(tPastes,sText) )
+            end
+            elseif nIndex == 3 then
+                    if tPreviousText[2] == "get" and tFlatNames[tPreviousText[3]]  then
+                            return completeMultipleChoice( sText, {tFlatNames[tPreviousText[3]]} )
+                    end
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/http/pastebin", completePastebin )
+     
+    --Chat implementation -- On join allow for duble tap of Tab to scan area for chat servers. Automaticly suggest names from tChatNames table
+     
+    local tChatOptions = {"join ", "host "}
+    --local tChatNames = {"Wojbie"}
+    local tServers = {}
+    local nLasttab = 0
+    local function completeChat( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice( sText, tChatOptions )
+            elseif nIndex == 2 and tPreviousText[2] == "join" then
+                    if sText =="" then
+                            local nTime=os.clock()
+                            if (nTime-nLasttab) < 0 then
+                                    --do nothing                   
+                            elseif (nTime-nLasttab) < 0.5 then
+                                    tServers = hostnameslook("chat") --on 2 empty inputs in 0.5 sec range do a rednet scan, if not empty dont re-scan.
+                                    if #tServers == 0 then
+                                            tServers =  {" [No Servers Found. Re-Tap to Re-Scan]"," "}
+                                            nLasttab = os.clock()
+                                    else
+                                            --tServers = quoteGuard(sText,tServers) --not used cause wonky
+                                            nLasttab = os.clock() + 30 --30 sec lock time after scan. So it won't scan in row.
+                                    end
+                            else
+                                    tServers =  {" [Double-Tap Tab to Scan]"," "}
+                                    nLasttab = os.clock()
+                            end
+                    end
+                    return completeMultipleChoice( sText, tServers , true )
+            elseif nIndex == 3 and tPreviousText[2] == "join" then
+                    return completeMultipleChoice( sText, tChatNames)
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/rednet/chat", completeChat )
+     
+    --GPS implementation -- move order of options so locate is first.
+     
+    local tGPSOptions = {"locate" , "host", "host "}
+    local function completeGPS( shell, nIndex, sText, tPreviousText )
+        if nIndex == 1 then
+            return completeMultipleChoice( sText, tGPSOptions )
+        end
+    end
+    shell.setCompletionFunction( "rom/programs/gps", completeGPS )
+     
+    --Type implementation - error removal
+    shell.setCompletionFunction( "rom/programs/type", shell.getCompletionInfo()["rom/programs/delete"].fnComplete ) --take correct one from delete program.
+     
+    --#Turtle Additions implementation
+     
+    if turtle then
+    --#Premade Tables
+     
+            local ArgLists = {
+                            ['slots']={},
+                            ['equip']={'left', 'right'},
+                            ['direction']={'left', 'right', 'forward', 'back', 'down', 'up'},
+                            ['turn']={'left', 'right'},
+            }
+            for i=1,16 do
+                    ArgLists['slots'][i]=tostring(i).." "
+            end
+     
+            local function completeGo( shell, nIndex, sText )
+                    if nIndex == 1 then
+                            return completeMultipleChoice(sText,ArgLists.direction)
+                    end
+            end
+            shell.setCompletionFunction( "rom/programs/turtle/go", completeGo )
+     
+            local function completeTurn( shell, nIndex, sText )
+                    if nIndex == 1 then
+                            return completeMultipleChoice(sText,ArgLists.turn)
+                    end
+            end
+            shell.setCompletionFunction( "rom/programs/turtle/turn", completeTurn )
+     
+            local function completeEquip( shell, nIndex, sText )
+                    if nIndex == 1 then
+                            return completeMultipleChoice(sText,ArgLists.slots,true)
+                    elseif nIndex == 2 then
+                            return completeMultipleChoice(sText,ArgLists.equip)
+                    end
+            end
+            shell.setCompletionFunction( "rom/programs/turtle/equip", completeEquip )
+     
+            local function completeUnequip( shell, nIndex, sText )
+                    if nIndex == 1 then
+                            return completeMultipleChoice(sText,ArgLists.equip)
+                    end
+            end
+            shell.setCompletionFunction( "rom/programs/turtle/unequip", completeUnequip )
+     
+    end
+
