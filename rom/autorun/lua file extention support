@@ -1,0 +1,5 @@
+local oldShellResolve = shell.resolveProgram
+
+shell.resolveProgram = function(program)
+  return oldShellResolve(program) or oldShellResolve(program .. ".lua")
+end
