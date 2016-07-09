@@ -1,0 +1,9 @@
+-- Author: Lupus590
+-- License: MIT
+
+top = "top"
+bottom = "bottom"
+left = "left"
+right = "right"
+front = "front"
+back = "back"
