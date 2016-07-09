@@ -1,0 +1,6 @@
+--source: http://www.computercraft.info/forums2/index.php?/topic/26889-solved-program-to-alter-craftos/page__view__findpost__p__253512
+local oldShellResolve = shell.resolveProgram
+
+shell.resolveProgram = function(program)
+  return oldShellResolve(program) or oldShellResolve(program .. ".lua")
+end
