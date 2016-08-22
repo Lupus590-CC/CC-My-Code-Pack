@@ -28,7 +28,7 @@ local function genLabel()
 		_type = "C"
 	end
 	
-	if command then --command computer?
+	if commands then --command computer?
 		os.setComputerLabel("Com"..tostring(os.getComputerID()))
 	else
 		os.setComputerLabel(advance.._type..tostring(os.getComputerID())) --append the id do that the computer has a unique label
