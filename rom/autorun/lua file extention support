@@ -7,7 +7,7 @@ end
 --source: Lupus590
 --contains functions from: http://www.computercraft.info/forums2/index.php?/topic/2716-extension-api/
 local oldLoadAPI = os.loadAPI
-os.loadAPI(api)
+os.loadAPI = function(api)
   local function get(sName)
     local t = {}
     for sMatch in string.gmatch(sName, "[^%.]+") do
@@ -29,4 +29,5 @@ os.loadAPI(api)
   end
   return oldLoadAPI(hide(api))
 end
-  
+
+print("file extention fine")
