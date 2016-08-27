@@ -1,0 +1,5 @@
+--A comment to make sure the file exists
+
+do
+  --nothing, just incase a mninifier removes comments
+end
