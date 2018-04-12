@@ -1,5 +1,5 @@
---Author: Lupus590
---License: MIT
+-- Author: Lupus590
+-- License: MIT
 
 local description = {
 "This script is designed to be run on startup and checks if computers have a label.",
@@ -10,28 +10,31 @@ local description = {
 
 
 local function genLabel()
-	local advance --is the computer an advanced golden computer?
-	local _type --is the computer a turtle, pocketPC or just a computer?
+	local advance -- is the computer an advanced golden computer?
+	local _type -- is the computer a turtle, pocketPC or just a computer?
 	
-	if term.isColour() then --advanced colour PC?
+	if term.isColour() then -- advanced colour PC?
 		advance = "A"
-	else --must be not advanced
+	else -- must be not advanced
 		advance = "N"
 	end
 
 	
-	if turtle then --turtle?
+	if turtle then -- turtle?
 		_type = "T"
-	elseif pocket then --pocketPC?
+	elseif pocket then -- pocketPC?
 		_type = "P"
-	else --must be normal computer
+  elseif select(2, term.getSize()) == 13 then -- plethora neural interface?
+    advance = "N" -- neural interfaces can only be advanced, and, as funny as 'AI' would be, that would be confusing if someone manages to make an AI in CC
+    _type = "I"
+	else -- must be normal computer
 		_type = "C"
 	end
 	
-	if commands then --command computer?
+	if commands then -- command computer?
 		os.setComputerLabel("Com"..tostring(os.getComputerID()))
 	else
-		os.setComputerLabel(advance.._type..tostring(os.getComputerID())) --append the id do that the computer has a unique label
+		os.setComputerLabel(advance.._type..tostring(os.getComputerID())) -- append the id do that the computer has a unique label
 	end
 end
 
@@ -41,15 +44,15 @@ local function printArgs()
 end
 
 
---main
+-- main
 local args = {...} or nil
 if args[1] == nil then
-	--normal mode
+	-- normal mode
 	if os.getComputerLabel() == nil then
 		genLabel()
 	end
 elseif args[1] == "f" or args[1] == "F" then
-	--force a re-gen
+	-- force a re-gen
 	genLabel()
 	print("Label set to "..os.getComputerLabel())
 else
