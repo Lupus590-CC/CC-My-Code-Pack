@@ -1,5 +1,7 @@
 --  update detection (per CC computer vs ROM copy)
 
+local beVerbose = true
+local messageDisplayTime = 0.5 -- force a sleep at the end of the file so that the verbose stuff displays, effectivly 0 if not verbose
 
 local function deploy()
   if fs.exists("/.mbs") then 
@@ -31,6 +33,9 @@ end
 
 if not fs.exists("/.mbs/version") then
   deploy()
+  if beVerbose then
+    print("MBS installed")
+  end
 else
 
   -- read version file and compair to ROM
@@ -44,9 +49,19 @@ else
   
   if rootVersion ~= romVersion then
     deploy()
+    if beVerbose then
+      print("MBS updated")
+    end
   else
-    return -- up to date, do nothing
+    if beVerbose then
+      print("MBS already up to date")
+    end
+    -- up to date, do nothing
   end
+end
+
+if beVerbose then
+  sleep(messageDisplayTime)
 end
   
 
