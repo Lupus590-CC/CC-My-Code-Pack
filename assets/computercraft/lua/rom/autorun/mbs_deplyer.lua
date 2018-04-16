@@ -1,7 +1,7 @@
 --  update detection (per CC computer vs ROM copy)
 
-local beVerbose = true
-local messageDisplayTime = 0.5 -- force a sleep at the end of the file so that the verbose stuff displays, effectivly 0 if not verbose
+local beVerbose = false
+local messageDisplayTime = 0.5 -- if verbose that this is how long to sleep at the end of the file. Ignored if not verbose.
 
 local function deploy()
   if fs.exists("/.mbs") then 
