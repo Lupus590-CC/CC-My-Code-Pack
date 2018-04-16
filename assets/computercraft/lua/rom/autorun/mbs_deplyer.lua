@@ -6,8 +6,8 @@ local function deploy()
     shell.run("delete /.mbs")
   end
   
-  local whiteList = {"bin", "lib", "modules"}
-  for k,v in ipairs(whiteList)
+  local whiteList = {"bin", "lib", "modules", "mbs.lua"}
+  for k,v in ipairs(whiteList) do
     shell.run("copy /rom/.mbs/"..v.." /.mbs/"..v)
   end
   
