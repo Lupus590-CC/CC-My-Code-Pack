@@ -24,9 +24,9 @@ local function genLabel()
 		_type = "T"
 	elseif pocket then -- pocketPC?
 		_type = "P"
-  elseif select(2, term.getSize()) == 13 then -- plethora neural interface?
-    advance = "N" -- neural interfaces can only be advanced, and, as funny as 'AI' would be, that would be confusing if someone manages to make an AI in CC
-    _type = "I"
+	elseif select(2, term.getSize()) == 13 then -- plethora neural interface?
+		advance = "N" -- neural interfaces can only be advanced, and, as funny as 'AI' would be, that would be confusing if someone manages to make an AI in CC
+		_type = "I"
 	else -- must be normal computer
 		_type = "C"
 	end
