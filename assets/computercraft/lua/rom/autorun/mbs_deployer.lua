@@ -4,9 +4,6 @@ if fs.exists("/startup/00_mbs.lua") then
 else
   fs.makeDir("/startup")
   local f = fs.open("/startup/00_mbs.lua", "w")
-  f.writeLine([[
-  shell.setAlias("mbs", "/rom/.mbs/mbs.lua")
-  shell.run("/rom/.mbs/mbs.lua startup")
-  ]])
+  f.writeLine("assert(loadfile(\"rom/.mbs/mbs.lua\", _ENV))('startup')")
   f.close()
 end
