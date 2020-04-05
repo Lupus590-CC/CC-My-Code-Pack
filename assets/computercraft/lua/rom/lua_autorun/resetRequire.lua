@@ -19,4 +19,4 @@ local function resetRequire()
   end
 end
 
-return resetRequire
+_ENV.resetRequire = resetRequire
