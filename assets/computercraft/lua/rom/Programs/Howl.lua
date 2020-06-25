@@ -1,30 +1,32 @@
-local loading = {}
-local oldRequire, preload, loaded = require, {}, { startup = loading }
+local preload = type(package) == "table" and type(package.preload) == "table" and package.preload or {}
 
-local function require(name)
-	local result = loaded[name]
+local require = require
+if type(require) ~= "function" then
+	local loading = {}
+	local loaded = {}
+	require = function(name)
+		local result = loaded[name]
 
-	if result ~= nil then
-		if result == loading then
-			error("loop or previous error loading module '" .. name .. "'", 2)
+		if result ~= nil then
+			if result == loading then
+				error("loop or previous error loading module '" .. name .. "'", 2)
+			end
+
+			return result
 		end
 
+		loaded[name] = loading
+		local contents = preload[name]
+		if contents then
+			result = contents(name)
+		else
+			error("cannot load '" .. name .. "'", 2)
+		end
+
+		if result == nil then result = true end
+		loaded[name] = result
 		return result
 	end
-
-	loaded[name] = loading
-	local contents = preload[name]
-	if contents then
-		result = contents(name)
-	elseif oldRequire then
-		result = oldRequire(name)
-	else
-		error("cannot load '" .. name .. "'", 2)
-	end
-
-	if result == nil then result = true end
-	loaded[name] = result
-	return result
 end
 preload["howl.tasks.Task"] = function(...)
 --- The main task class
@@ -203,7 +205,7 @@ function Task:Run(context, ...)
 	end
 
 	if context.ShowTime then
-		print(" ", "Took " .. os.clock() - oldTime .. "s")
+		print(" ", ("Took %.2fs"):format(os.clock() - oldTime))
 	end
 
 	return true
@@ -316,6 +318,7 @@ function Runner:RunMany(names)
 	else
 		for _, name in ipairs(names) do
 			value = context:Start(name)
+			if not value then break end
 		end
 	end
 
@@ -529,7 +532,7 @@ function Context:Run(name, ...)
 		self.ran[task] = ran
 	else
 		for i = 1, #ran do
-			if arrayEquals(args, ran[i]) then return false end
+			if arrayEquals(args, ran[i]) then return true end
 		end
 		ran[#ran + 1] = args
 	end
@@ -1035,14 +1038,24 @@ preload["howl.platform.cc"] = function(...)
 local default = term.getTextColor and term.getTextColor() or colors.white
 
 local function read(file)
-	local handle = fs.open(file, "r")
+	local handle, err = fs.open(file, "r")
+	if not handle then
+		if not err:find(":") then err = file .. ": " .. tostring(err) end
+		error(err, 2)
+	end
+
 	local contents = handle.readAll()
 	handle.close()
 	return contents
 end
 
 local function write(file, contents)
-	local handle = fs.open(file, "w")
+	local handle, err = fs.open(file, "w")
+	if not handle then
+		if not err:find(":") then err = file .. ": " .. tostring(err) end
+		error(err, 2)
+	end
+
 	handle.write(contents)
 	handle.close()
 end
@@ -1089,30 +1102,12 @@ local function writeDir(dir, files)
 	end
 end
 
-local request
-if http.fetch then
-	request = function(url, post, headers)
-		local ok, err = http.fetch(url, post, headers)
-		if ok then
-			while true do
-				local event, param1, param2, param3 = os.pullEvent(e)
-				if event == "http_success" and param1 == url then
-					return true, param2
-				elseif event == "http_failure" and param1 == url then
-					return false, param3, param2
-				end
-			end
-		end
-		return false, nil, err
-	end
-else
-	request = function(...)
-		local ok, result = http.post(...)
-		if ok then
-			return true, result
-		else
-			return false, nil, result
-		end
+local request= function(...)
+	local ok, result, err_handle = http.post(...)
+	if ok then
+		return true, result
+	else
+		return false, err_handle, result
 	end
 end
 
@@ -1424,7 +1419,7 @@ local Runner = require "howl.tasks.Runner"
 local Task = require "howl.tasks.Task"
 
 local header = require "howl.modules.tasks.require.header"
-local envSetup = "local env = setmetatable({ require = require, preload = preload, }, { __index = getfenv() })\n"
+local envSetup = "local env = setmetatable({ require = require, }, { __index = _ENV })\n"
 
 local function toModule(file)
 	if file:find("%.lua$") then
@@ -1478,13 +1473,12 @@ function RequireTask:setup(context, runner)
 
 	if not self.options.output then
 		context.logger:error("Task '%s': No output file", self.name)
- 	end
+	end
 end
 
 function RequireTask:runAction(context)
 	local files = self.sources:gatherFiles(context.root)
-	local startup = fs.combine(context.root, self.options.startup)
-	local startup_name = nil
+	local startup = self.options.startup
 	local output = self.options.output
 	local link = self.options.link
 
@@ -1493,35 +1487,24 @@ function RequireTask:runAction(context)
 
 	if link then result:append(envSetup) end
 
+	local startup_path, startup_name = startup and fs.combine(context.root, startup)
 	for _, file in pairs(files) do
 		context.logger:verbose("Including " .. file.relative)
 		result:append("preload[\"" .. file.name .. "\"] = ")
+		if file.path == startup_path then startup_name = file.name end
+
 		if link then
 			assert(fs.exists(file.path), "Cannot find " .. file.relative)
-			result:append("setfenv(assert(loadfile(\"" .. file.path .. "\")), env)\n")
+			result:append("assert(loadfile(\"" .. file.path .. "\", env))\n")
 		else
 			result:append("function(...)\n" .. file.contents .. "\nend\n")
 		end
-
-		if file.path == startup then
-			startup_name = file.name
-		end
-	end
-
-	if not startup_name then
-		error("Cannot find startup file " .. self.options.startup .. " in file list", 0)
 	end
 
 	if self.options.api then
-		result:append("if not shell or type(... or nil) == 'table' then\n")
-		result:append("local tbl = ... or {}\n")
-		result:append("tbl.require = require tbl.preload = preload\n")
-		result:append("return tbl\n")
-		result:append("else\n")
-	end
-	result:append("return preload[\"" .. startup_name .. "\"](...)\n")
-	if self.options.api then
-		result:append("end\n")
+		result:append("return require")
+	else
+		result:append("return preload[\"" .. startup_name .. "\"](...)\n")
 	end
 
 	fs.write(fs.combine(context.root, output), result:toString())
@@ -1546,230 +1529,232 @@ return {
 }
 end
 preload["howl.modules.tasks.require.header"] = function(...)
-return "local loading = {}\
-local oldRequire, preload, loaded = require, {}, { startup = loading }\
+return "local preload = type(package) == \"table\" and type(package.preload) == \"table\" and package.preload or {}\
 \
-local function require(name)\
-\009local result = loaded[name]\
+local require = require\
+if type(require) ~= \"function\" then\
+	local loading = {}\
+	local loaded = {}\
+	require = function(name)\
+		local result = loaded[name]\
 \
-\009if result ~= nil then\
-\009\009if result == loading then\
-\009\009\009error(\"loop or previous error loading module '\" .. name .. \"'\", 2)\
-\009\009end\
+		if result ~= nil then\
+			if result == loading then\
+				error(\"loop or previous error loading module '\" .. name .. \"'\", 2)\
+			end\
 \
-\009\009return result\
-\009end\
+			return result\
+		end\
 \
-\009loaded[name] = loading\
-\009local contents = preload[name]\
-\009if contents then\
-\009\009result = contents(name)\
-\009elseif oldRequire then\
-\009\009result = oldRequire(name)\
-\009else\
-\009\009error(\"cannot load '\" .. name .. \"'\", 2)\
-\009end\
+		loaded[name] = loading\
+		local contents = preload[name]\
+		if contents then\
+			result = contents(name)\
+		else\
+			error(\"cannot load '\" .. name .. \"'\", 2)\
+		end\
 \
-\009if result == nil then result = true end\
-\009loaded[name] = result\
-\009return result\
+		if result == nil then result = true end\
+		loaded[name] = result\
+		return result\
+	end\
 end"
 end
 preload["howl.modules.tasks.pack.vfs"] = function(...)
 return "local fs = fs\
 \
 local matches = {\
-\009[\"^\"] = \"%^\",\
-\009[\"$\"] = \"%$\",\
-\009[\"(\"] = \"%(\",\
-\009[\")\"] = \"%)\",\
-\009[\"%\"] = \"%%\",\
-\009[\".\"] = \"%.\",\
-\009[\"[\"] = \"%[\",\
-\009[\"]\"] = \"%]\",\
-\009[\"*\"] = \"%*\",\
-\009[\"+\"] = \"%+\",\
-\009[\"-\"] = \"%-\",\
-\009[\"?\"] = \"%?\",\
-\009[\"\\0\"] = \"%z\",\
+	[\"^\"] = \"%^\",\
+	[\"$\"] = \"%$\",\
+	[\"(\"] = \"%(\",\
+	[\")\"] = \"%)\",\
+	[\"%\"] = \"%%\",\
+	[\".\"] = \"%.\",\
+	[\"[\"] = \"%[\",\
+	[\"]\"] = \"%]\",\
+	[\"*\"] = \"%*\",\
+	[\"+\"] = \"%+\",\
+	[\"-\"] = \"%-\",\
+	[\"?\"] = \"%?\",\
+	[\"\\0\"] = \"%z\",\
 }\
 \
 --- Escape a string for using in a pattern\
 -- @tparam string pattern The string to escape\
 -- @treturn string The escaped pattern\
 local function escapePattern(pattern)\
-\009return (pattern:gsub(\".\", matches))\
+	return (pattern:gsub(\".\", matches))\
 end\
 \
 local function matchesLocal(root, path)\
-\009return root == \"\" or path == root or path:sub(1, #root + 1) == root .. \"/\"\
+	return root == \"\" or path == root or path:sub(1, #root + 1) == root .. \"/\"\
 end\
 \
 local function extractLocal(root, path)\
-\009if root == \"\" then\
-\009\009return path\
-\009else\
-\009\009return path:sub(#root + 2)\
-\009end\
+	if root == \"\" then\
+		return path\
+	else\
+		return path:sub(#root + 2)\
+	end\
 end\
 \
 \
 local function copy(old)\
-\009local new = {}\
-\009for k, v in pairs(old) do new[k] = v end\
-\009return new\
+	local new = {}\
+	for k, v in pairs(old) do new[k] = v end\
+	return new\
 end\
 \
 --[[\
-\009Emulates a basic file system.\
-\009This doesn't have to be too advanced as it is only for Howl's use\
-\009The files is a list of paths to file contents, or true if the file\
-\009is a directory.\
-\009TODO: Override IO\
+	Emulates a basic file system.\
+	This doesn't have to be too advanced as it is only for Howl's use\
+	The files is a list of paths to file contents, or true if the file\
+	is a directory.\
+	TODO: Override IO\
 ]]\
 local function makeEnv(root, files)\
-\009-- Emulated filesystem (partially based of Oeed's)\
-\009files = copy(files)\
-\009local env\
-\009env = {\
-\009\009fs = {\
-\009\009\009list = function(path)\
-\009\009\009\009path = fs.combine(path, \"\")\
-\009\009\009\009local list = fs.isDir(path) and fs.list(path) or {}\
+	-- Emulated filesystem (partially based of Oeed's)\
+	files = copy(files)\
+	local env\
+	env = {\
+		fs = {\
+			list = function(path)\
+				path = fs.combine(path, \"\")\
+				local list = fs.isDir(path) and fs.list(path) or {}\
 \
-\009\009\009\009if matchesLocal(root, path) then\
-\009\009\009\009\009local pattern = \"^\" .. escapePattern(extractLocal(root, path))\
-\009\009\009\009\009if pattern ~= \"^\" then pattern = pattern .. '/' end\
-\009\009\009\009\009pattern = pattern .. '([^/]+)$'\
+				if matchesLocal(root, path) then\
+					local pattern = \"^\" .. escapePattern(extractLocal(root, path))\
+					if pattern ~= \"^\" then pattern = pattern .. '/' end\
+					pattern = pattern .. '([^/]+)$'\
 \
-\009\009\009\009\009for file, _ in pairs(files) do\
-\009\009\009\009\009\009local name = file:match(pattern)\
-\009\009\009\009\009\009if name then list[#list + 1] = name end\
-\009\009\009\009\009end\
-\009\009\009\009end\
+					for file, _ in pairs(files) do\
+						local name = file:match(pattern)\
+						if name then list[#list + 1] = name end\
+					end\
+				end\
 \
-\009\009\009\009return list\
-\009\009\009end,\
+				return list\
+			end,\
 \
-\009\009\009exists = function(path)\
-\009\009\009\009path = fs.combine(path, \"\")\
-\009\009\009\009if fs.exists(path) then\
-\009\009\009\009\009return true\
-\009\009\009\009elseif matchesLocal(root, path) then\
-\009\009\009\009\009return files[extractLocal(root, path)] ~= nil\
-\009\009\009\009end\
-\009\009\009end,\
+			exists = function(path)\
+				path = fs.combine(path, \"\")\
+				if fs.exists(path) then\
+					return true\
+				elseif matchesLocal(root, path) then\
+					return files[extractLocal(root, path)] ~= nil\
+				end\
+			end,\
 \
-\009\009\009isDir = function(path)\
-\009\009\009\009path = fs.combine(path, \"\")\
-\009\009\009\009if fs.isDir(path) then\
-\009\009\009\009\009return true\
-\009\009\009\009elseif matchesLocal(root, path) then\
-\009\009\009\009\009return files[extractLocal(root, path)] == true\
-\009\009\009\009end\
-\009\009\009end,\
+			isDir = function(path)\
+				path = fs.combine(path, \"\")\
+				if fs.isDir(path) then\
+					return true\
+				elseif matchesLocal(root, path) then\
+					return files[extractLocal(root, path)] == true\
+				end\
+			end,\
 \
-\009\009\009isReadOnly = function(path)\
-\009\009\009\009path = fs.combine(path, \"\")\
-\009\009\009\009if fs.exists(path) then\
-\009\009\009\009\009return fs.isReadOnly(path)\
-\009\009\009\009elseif matchesLocal(root, path) and files[extractLocal(root, path)] ~= nil then\
-\009\009\009\009\009return true\
-\009\009\009\009else\
-\009\009\009\009\009return false\
-\009\009\009\009end\
-\009\009\009end,\
+			isReadOnly = function(path)\
+				path = fs.combine(path, \"\")\
+				if fs.exists(path) then\
+					return fs.isReadOnly(path)\
+				elseif matchesLocal(root, path) and files[extractLocal(root, path)] ~= nil then\
+					return true\
+				else\
+					return false\
+				end\
+			end,\
 \
-\009\009\009getName = fs.getName,\
-\009\009\009getDir = fs.getDir,\
-\009\009\009getSize = fs.getSize,\
-\009\009\009getFreeSpace = fs.getFreeSpace,\
-\009\009\009combine = fs.combine,\
+			getName = fs.getName,\
+			getDir = fs.getDir,\
+			getSize = fs.getSize,\
+			getFreeSpace = fs.getFreeSpace,\
+			combine = fs.combine,\
 \
-\009\009\009-- TODO: This should be implemented\
-\009\009\009move = fs.move,\
-\009\009\009copy = fs.copy,\
-\009\009\009makeDir = function(dir)\
+			-- TODO: This should be implemented\
+			move = fs.move,\
+			copy = fs.copy,\
+			makeDir = function(dir)\
 \
-\009\009\009end,\
-\009\009\009delete = fs.delete,\
+			end,\
+			delete = fs.delete,\
 \
-\009\009\009open = function(path, mode)\
-\009\009\009\009path = fs.combine(path, \"\")\
-\009\009\009\009if matchesLocal(root, path) then\
-\009\009\009\009\009local localPath = extractLocal(root, path)\
-\009\009\009\009\009if type(files[localPath]) == 'string' then\
-\009\009\009\009\009\009local handle = {close = function()end}\
-\009\009\009\009\009\009if mode == 'r' then\
-\009\009\009\009\009\009\009local content = files[localPath]\
-\009\009\009\009\009\009\009handle.readAll = function()\
-\009\009\009\009\009\009\009\009return content\
-\009\009\009\009\009\009\009end\
+			open = function(path, mode)\
+				path = fs.combine(path, \"\")\
+				if matchesLocal(root, path) then\
+					local localPath = extractLocal(root, path)\
+					if type(files[localPath]) == 'string' then\
+						local handle = {close = function()end}\
+						if mode == 'r' then\
+							local content = files[localPath]\
+							handle.readAll = function()\
+								return content\
+							end\
 \
-\009\009\009\009\009\009\009local line = 1\
-\009\009\009\009\009\009\009local lines\
-\009\009\009\009\009\009\009handle.readLine = function()\
-\009\009\009\009\009\009\009\009if not lines then -- Lazy load lines\
-\009\009\009\009\009\009\009\009\009lines = {content:match((content:gsub(\"[^\\n]+\\n?\", \"([^\\n]+)\\n?\")))}\
-\009\009\009\009\009\009\009\009end\
-\009\009\009\009\009\009\009\009if line > #lines then\
-\009\009\009\009\009\009\009\009\009return nil\
-\009\009\009\009\009\009\009\009else\
-\009\009\009\009\009\009\009\009\009return lines[line]\
-\009\009\009\009\009\009\009\009end\
-\009\009\009\009\009\009\009\009line = line + 1\
-\009\009\009\009\009\009\009end\
+							local line = 1\
+							local lines\
+							handle.readLine = function()\
+								if not lines then -- Lazy load lines\
+									lines = {content:match((content:gsub(\"[^\\n]+\\n?\", \"([^\\n]+)\\n?\")))}\
+								end\
+								if line > #lines then\
+									return nil\
+								else\
+									return lines[line]\
+								end\
+								line = line + 1\
+							end\
 \
-\009\009\009\009\009\009\009return handle\
-\009\009\009\009\009\009else\
-\009\009\009\009\009\009\009error('Cannot write to read-only file.', 2)\
-\009\009\009\009\009\009end\
-\009\009\009\009\009end\
-\009\009\009\009end\
+							return handle\
+						else\
+							error('Cannot write to read-only file.', 2)\
+						end\
+					end\
+				end\
 \
-\009\009\009\009return fs.open(path, mode)\
-\009\009\009end\
-\009\009},\
+				return fs.open(path, mode)\
+			end\
+		},\
 \
-\009\009loadfile = function(name)\
-\009\009\009local file = env.fs.open(name, \"r\")\
-\009\009\009if file then\
-\009\009\009\009local func, err = load(file.readAll(), fs.getName(name), nil, env)\
-\009\009\009\009file.close()\
-\009\009\009\009return func, err\
-\009\009\009end\
-\009\009\009return nil, \"File not found: \"..name\
-\009\009end,\
+		loadfile = function(name)\
+			local file = env.fs.open(name, \"r\")\
+			if file then\
+				local func, err = load(file.readAll(), fs.getName(name), nil, env)\
+				file.close()\
+				return func, err\
+			end\
+			return nil, \"File not found: \"..name\
+		end,\
 \
-\009\009dofile = function(name)\
-\009\009\009local file, e = env.loadfile(name, env)\
-\009\009\009if file then\
-\009\009\009\009return file()\
-\009\009\009else\
-\009\009\009\009error(e, 2)\
-\009\009\009end\
-\009\009end,\
-\009}\
+		dofile = function(name)\
+			local file, e = env.loadfile(name, env)\
+			if file then\
+				return file()\
+			else\
+				error(e, 2)\
+			end\
+		end,\
+	}\
 \
-\009env._G = env\
-\009env._ENV = env\
-\009return setmetatable(env, {__index = _ENV or getfenv()})\
+	env._G = env\
+	env._ENV = env\
+	return setmetatable(env, {__index = _ENV or getfenv()})\
 end\
 \
 local function extract(root, files, from, to)\
-\009local pattern = \"^\" .. escapePattern(extractLocal(root, from))\
-\009if pattern ~= \"^\" then pattern = pattern .. '/' end\
-\009pattern = pattern .. '(.*)$'\
+	local pattern = \"^\" .. escapePattern(extractLocal(root, from))\
+	if pattern ~= \"^\" then pattern = pattern .. '/' end\
+	pattern = pattern .. '(.*)$'\
 \
-\009for file, contents in pairs(files) do\
-\009\009local name = file:match(pattern)\
-\009\009if name then\
-\009\009\009print(\"Extracting \" .. name)\
-\009\009\009local handle = fs.open(fs.combine(to, name), \"w\")\
-\009\009\009handle.write(contents)\
-\009\009\009handle.close()\
-\009\009end\
-\009end\
+	for file, contents in pairs(files) do\
+		local name = file:match(pattern)\
+		if name then\
+			print(\"Extracting \" .. name)\
+			local handle = fs.open(fs.combine(to, name), \"w\")\
+			handle.write(contents)\
+			handle.close()\
+		end\
+	end\
 end"
 end
 preload["howl.modules.tasks.pack.template"] = function(...)
@@ -1780,12 +1765,12 @@ ${vfs}\
 local root = \"\"\
 local args = {...}\
 if #args == 1 and args[1] == '--extract' then\
-\009extract(root, files, \"\", root)\
+	extract(root, files, \"\", root)\
 else\
-\009local env = makeEnv(root, files)\
-\009local func, err = env.loadfile(${startup})\
-\009if not func then error(err, 0) end\
-\009return func(...)\
+	local env = makeEnv(root, files)\
+	local func, err = env.loadfile(${startup})\
+	if not func then error(err, 0) end\
+	return func(...)\
 end"
 end
 preload["howl.modules.tasks.pack"] = function(...)
@@ -1959,7 +1944,7 @@ function MinifyTask:runAction(context)
 
 	-- Ugly hack as length specifiers don't work on %f under LuaJ.
 	percentDecreased = math.floor(percentDecreased * 100) / 100
-	context.logger:verbose(("%.20f%% decrease in file size"):format(percentDecreased))
+	context.logger:verbose(("%.2f%% decrease in file size"):format(percentDecreased))
 end
 
 local MinifyExtensions = {}
@@ -2039,12 +2024,14 @@ function GistTask:setup(context, runner)
 	if not self.options.gist then
 		context.logger:error("Task '%s': No gist ID specified", self.name)
 	end
-	if not settings.githubKey then
-		context.logger:error("Task '%s': No GitHub API key specified. Goto https://github.com/settings/tokens/new to create one.", self.name)
-	end
 end
 
 function GistTask:runAction(context)
+	if not settings.githubKey then
+		context.logger:error("Task '%s': No GitHub API key specified. Goto https://github.com/settings/tokens/new to create one.", self.name)
+		return false
+	end
+
 	local files = self.sources:gatherFiles(self.root)
 	local gist = self.options.gist
 	local token = settings.githubKey
@@ -2066,7 +2053,7 @@ function GistTask:runAction(context)
 			context.logger:error(handle.readAll())
 		end
 
-		error(result, 0)
+		error(message, 0)
 	end
 end
 
@@ -2124,7 +2111,7 @@ function CleanTask:setup(context, runner)
 	local root = self.sources
 	if root.allowEmpty and #root.includes == 0 then
 		-- Include the build directory if nothing is set
-		root:include(fs.combine(context.out, "*"))
+		root:from(context.out, { include = "*" })
 	end
 end
 
@@ -3062,107 +3049,6 @@ local Mediator = setmetatable(
 )
 return Mediator()
 end
-preload["howl.lib.Logger"] = function(...)
---- The main logger for Lua
--- @classmod howl.lib.Logger
-
-local class = require "howl.class"
-local mixin = require "howl.class.mixin"
-local dump = require "howl.lib.dump".dump
-local colored = require "howl.lib.colored"
-local platformLog = require "howl.platform".log
-
-local select, tostring = select, tostring
-local function concat(...)
-	local buffer = {}
-	for i = 1, select('#', ...) do
-		buffer[i] = tostring(select(i, ...))
-	end
-	return table.concat(buffer, " ")
-end
-
-local Logger = class("howl.lib.Logger")
-	:include(mixin.sealed)
-	:include(mixin.curry)
-
-function Logger:initialize(context)
-	self.isVerbose = false
-	context.mediator:subscribe({ "ArgParse", "changed" }, function(options)
-		self.isVerbose = options:Get "verbose" or false
-	end)
-end
-
---- Print a series of objects if verbose mode is enabled
-function Logger:verbose(...)
-	if self.isVerbose then
-		local _, m = pcall(function() error("", 4) end)
-		colored.writeColor("gray", m)
-		colored.printColor("lightGray", ...)
-		platformLog("verbose", m .. concat(...))
-	end
-end
-
---- Dump a series of objects if verbose mode is enabled
-function Logger:dump(...)
-	if self.isVerbose then
-		local _, m = pcall(function() error("", 4) end)
-		colored.writeColor("gray", m)
-
-		local len = select('#', ...)
-		local args = {...}
-		for i = 1, len do
-			local value = args[i]
-			local t = type(value)
-			if t == "table" then
-				value = dump(value)
-			else
-				value = tostring(value)
-			end
-
-			if i > 1 then value = " " .. value end
-			-- TODO: use platformLog too.
-			colored.writeColor("lightGray", value)
-		end
-		print()
-	end
-end
-
-local types = {
-	{ "success", "ok", "green" },
-	{ "error", "error", "red" },
-	{ "info", "info", "cyan" },
-	{ "warning", "warn", "yellow" },
-}
-
-local max = 0
-for _, v in ipairs(types) do
-	max = math.max(max, #v[2])
-end
-
-for _, v in ipairs(types) do
-	local color = v[3]
-	local format = '[' .. v[2] .. ']' .. (' '):rep(max - #v[2] + 1)
-	local field = "has" .. v[2]:gsub("^%l", string.upper)
-	local name = v[1]
-
-	Logger[name] = function(self, fmt, ...)
-		self[field] = true
-		colored.writeColor(color, format)
-
-		local text
-		if type(fmt) == "string" then
-			text = fmt:format(...)
-		else
-
-		end
-
-		colored.printColor(color, text)
-		platformLog(name, text)
-	end
-end
-
-return Logger
-end
 preload["howl.lib.json"] = function(...)
 local controls = {["\n"]="\\n", ["\r"]="\\r", ["\t"]="\\t", ["\b"]="\\b", ["\f"]="\\f", ["\""]="\\\"", ["\\"]="\\\\"}
 local function isArray(t)
@@ -3583,36 +3469,6 @@ return {
 	writeColor = writeColor,
 }
 end
-preload["howl.lib.Buffer"] = function(...)
---- An optimised class for appending strings
--- @classmod howl.lib.Buffer
-
-local concat = table.concat
-
---- Append to this buffer
--- @tparam string text
--- @treturn Buffer The current buffer to allow chaining
-local function append(self, text)
-	local n = self.n + 1
-	self[n] = text
-	self.n = n
-	return self
-end
-
---- Convert this buffer to a string
--- @treturn string String representation of the buffer
-local function toString(self)
-	return concat(self)
-end
-
---- Create a new buffer
--- @treturn Buffer The buffer
-return function()
-	return {
-		n = 0, append = append, toString = toString
-	}
-end
-end
 preload["howl.lib.assert"] = function(...)
 --- Assertion helpers
 -- @module howl.lib.assert
@@ -3940,6 +3796,135 @@ return {
 	Options = Options,
 }
 end
+preload["howl.lib.Logger"] = function(...)
+--- The main logger for Lua
+-- @classmod howl.lib.Logger
+
+local class = require "howl.class"
+local mixin = require "howl.class.mixin"
+local dump = require "howl.lib.dump".dump
+local colored = require "howl.lib.colored"
+local platformLog = require "howl.platform".log
+
+local select, tostring = select, tostring
+local function concat(...)
+	local buffer = {}
+	for i = 1, select('#', ...) do
+		buffer[i] = tostring(select(i, ...))
+	end
+	return table.concat(buffer, " ")
+end
+
+local Logger = class("howl.lib.Logger")
+	:include(mixin.sealed)
+	:include(mixin.curry)
+
+function Logger:initialize(context)
+	self.isVerbose = false
+	context.mediator:subscribe({ "ArgParse", "changed" }, function(options)
+		self.isVerbose = options:Get "verbose" or false
+	end)
+end
+
+--- Print a series of objects if verbose mode is enabled
+function Logger:verbose(...)
+	if self.isVerbose then
+		local _, m = pcall(function() error("", 4) end)
+		colored.writeColor("gray", m)
+		colored.printColor("lightGray", ...)
+		platformLog("verbose", m .. concat(...))
+	end
+end
+
+--- Dump a series of objects if verbose mode is enabled
+function Logger:dump(...)
+	if self.isVerbose then
+		local _, m = pcall(function() error("", 4) end)
+		colored.writeColor("gray", m)
+
+		local len = select('#', ...)
+		local args = {...}
+		for i = 1, len do
+			local value = args[i]
+			local t = type(value)
+			if t == "table" then
+				value = dump(value)
+			else
+				value = tostring(value)
+			end
+
+			if i > 1 then value = " " .. value end
+			-- TODO: use platformLog too.
+			colored.writeColor("lightGray", value)
+		end
+		print()
+	end
+end
+
+local types = {
+	{ "success", "ok", "green" },
+	{ "error", "error", "red" },
+	{ "info", "info", "cyan" },
+	{ "warning", "warn", "yellow" },
+}
+
+local max = 0
+for _, v in ipairs(types) do
+	max = math.max(max, #v[2])
+end
+
+for _, v in ipairs(types) do
+	local color = v[3]
+	local format = '[' .. v[2] .. ']' .. (' '):rep(max - #v[2] + 1)
+	local field = "has" .. v[2]:gsub("^%l", string.upper)
+	local name = v[1]
+
+	Logger[name] = function(self, fmt, ...)
+		self[field] = true
+		colored.writeColor(color, format)
+
+		local text
+		if type(fmt) == "string" then
+			text = fmt:format(...)
+		end
+
+		colored.printColor(color, text)
+		platformLog(name, text)
+	end
+end
+
+return Logger
+end
+preload["howl.lib.Buffer"] = function(...)
+--- An optimised class for appending strings
+-- @classmod howl.lib.Buffer
+
+local concat = table.concat
+
+--- Append to this buffer
+-- @tparam string text
+-- @treturn Buffer The current buffer to allow chaining
+local function append(self, text)
+	local n = self.n + 1
+	self[n] = text
+	self.n = n
+	return self
+end
+
+--- Convert this buffer to a string
+-- @treturn string String representation of the buffer
+local function toString(self)
+	return concat(self)
+end
+
+--- Create a new buffer
+-- @treturn Buffer The buffer
+return function()
+	return {
+		n = 0, append = append, toString = toString
+	}
+end
+end
 preload["howl.lexer.walk"] = function(...)
 local function terminate() end
 local function callExpr(node, visitor)
@@ -4060,381 +4045,6 @@ visitors = {
 
 return visit
 end
-preload["howl.lexer.TokenList"] = function(...)
---- Provides utilities for reading tokens from a 'stream'
--- @module howl.lexer.TokenList
-
-local min = math.min
-local insert = table.insert
-
-return function(tokens)
-	local n = #tokens
-	local pointer = 1
-
-	--- Get this element in the token list
-	-- @tparam int offset The offset in the token list
-	local function Peek(offset)
-		return tokens[min(n, pointer + (offset or 0))]
-	end
-
-	--- Get the next token in the list
-	-- @tparam table tokenList Add the token onto this table
-	-- @treturn Token The token
-	local function Get(tokenList)
-		local token = tokens[pointer]
-		pointer = min(pointer + 1, n)
-		if tokenList then
-			insert(tokenList, token)
-		end
-		return token
-	end
-
-	--- Check if the next token is of a type
-	-- @tparam string type The type to compare it with
-	-- @treturn bool If the type matches
-	local function Is(type)
-		return Peek().Type == type
-	end
-
-	--- Check if the next token is a symbol and return it
-	-- @tparam string symbol Symbol to check (Optional)
-	-- @tparam table tokenList Add the token onto this table
-	-- @treturn [ 0 ] ?|token If symbol is not specified, return the token
-	-- @treturn [ 1 ] boolean If symbol is specified, return true if it matches
-	local function ConsumeSymbol(symbol, tokenList)
-		local token = Peek()
-		if token.Type == 'Symbol' then
-			if symbol then
-				if token.Data == symbol then
-					if tokenList then insert(tokenList, token) end
-					pointer = pointer + 1
-					return true
-				else
-					return nil
-				end
-			else
-				if tokenList then insert(tokenList, token) end
-				pointer = pointer + 1
-				return token
-			end
-		else
-			return nil
-		end
-	end
-
-	--- Check if the next token is a keyword and return it
-	-- @tparam string kw Keyword to check (Optional)
-	-- @tparam table tokenList Add the token onto this table
-	-- @treturn [ 0 ] ?|token If kw is not specified, return the token
-	-- @treturn [ 1 ] boolean If kw is specified, return true if it matches
-	local function ConsumeKeyword(kw, tokenList)
-		local token = Peek()
-		if token.Type == 'Keyword' and token.Data == kw then
-			if tokenList then insert(tokenList, token) end
-			pointer = pointer + 1
-			return true
-		else
-			return nil
-		end
-	end
-
-	--- Check if the next token matches is a keyword
-	-- @tparam string kw The particular keyword
-	-- @treturn boolean If it matches or not
-	local function IsKeyword(kw)
-		local token = Peek()
-		return token.Type == 'Keyword' and token.Data == kw
-	end
-
-	--- Check if the next token matches is a symbol
-	-- @tparam string symbol The particular symbol
-	-- @treturn boolean If it matches or not
-	local function IsSymbol(symbol)
-		local token = Peek()
-		return token.Type == 'Symbol' and token.Data == symbol
-	end
-
-	--- Check if the next token is an end of file
-	-- @treturn boolean If the next token is an end of file
-	local function IsEof()
-		return Peek().Type == 'Eof'
-	end
-
-	--- Produce a string off all tokens
-	-- @tparam boolean includeLeading Include the leading whitespace
-	-- @treturn string The resulting string
-	local function Print(includeLeading)
-		includeLeading = (includeLeading == nil and true or includeLeading)
-
-		local out = ""
-		for _, token in ipairs(tokens) do
-			if includeLeading then
-				for _, whitespace in ipairs(token.LeadingWhite) do
-					out = out .. whitespace:Print() .. "\n"
-				end
-			end
-			out = out .. token:Print() .. "\n"
-		end
-
-		return out
-	end
-
-	return {
-		Peek = Peek,
-		Get = Get,
-		Is = Is,
-		ConsumeSymbol = ConsumeSymbol,
-		ConsumeKeyword = ConsumeKeyword,
-		IsKeyword = IsKeyword,
-		IsSymbol = IsSymbol,
-		IsEof = IsEof,
-		Print = Print,
-		Tokens = tokens,
-	}
-end
-end
-preload["howl.lexer.Scope"] = function(...)
---- Holds variables for one scope
--- This implementation is inefficient. Instead of using hashes,
--- a linear search is used instead to look up variables
--- @module howl.lexer.Scope
-
-local keywords = require "howl.lexer.constants".Keywords
-
---- Holds the data for one variable
--- @table Variable
--- @tfield Scope Scope The parent scope
--- @tfield string Name The name of the variable
--- @tfield boolean IsGlobal Is the variable global
--- @tfield boolean CanRename If the variable can be renamed
--- @tfield int References Number of references
-
---- Holds variables for one scope
--- @type Scope
--- @tfield ?|Scope Parent The parent scope
--- @tfield table Locals A list of locals variables
--- @tfield table Globals A list of global variables
--- @tfield table Children A list of children @{Scope|scopes}
-
-local Scope = {}
-
---- Add a local to this scope
--- @tparam Variable variable The local object
-function Scope:AddLocal(name, variable)
-	table.insert(self.Locals, variable)
-	self.LocalMap[name] = variable
-end
-
---- Create a @{Variable} and add it to the scope
--- @tparam string name The name of the local
--- @treturn Variable The created local
-function Scope:CreateLocal(name)
-	local variable = self:GetLocal(name)
-	if variable then return variable end
-
-	variable = {
-		Scope = self,
-		Name = name,
-		IsGlobal = false,
-		CanRename = true,
-		References = 1,
-	}
-
-	self:AddLocal(name, variable)
-	return variable
-end
-
---- Get a local variable
--- @tparam string name The name of the local
--- @treturn ?|Variable The variable
-function Scope:GetLocal(name)
-	repeat
-		local var = self.LocalMap[name]
-		if var then return var end
-
-
-		self = self.Parent
-	until not self
-end
-
---- Find an local variable by its old name
--- @tparam string name The old name of the local
--- @treturn ?|Variable The local variable
-function Scope:GetOldLocal(name)
-	if self.oldLocalNamesMap[name] then
-		return self.oldLocalNamesMap[name]
-	end
-	return self:GetLocal(name)
-end
-
---- Rename a local variable
--- @tparam string|Variable oldName The old variable name
--- @tparam string newName The new variable name
-function Scope:RenameLocal(oldName, newName)
-	oldName = type(oldName) == 'string' and oldName or oldName.Name
-
-	repeat
-		local var = self.LocalMap[oldName]
-		if var then
-			var.Name = newName
-			self.oldLocalNamesMap[oldName] = var
-			self.LocalMap[oldName] = nil
-			self.LocalMap[newName] = var
-			break
-		end
-
-		self = self.Parent
-	until not self
-end
-
---- Add a global to this scope
--- @tparam Variable name The name of the global
-function Scope:AddGlobal(name, variable)
-	table.insert(self.Globals, variable)
-	self.GlobalMap[name] = variable
-end
-
---- Create a @{Variable} and add it to the scope
--- @tparam string name The name of the global
--- @treturn Variable The created global
-function Scope:CreateGlobal(name)
-	local variable = self:GetGlobal(name)
-	if variable then return variable end
-
-	variable = {
-		Scope = self,
-		Name = name,
-		IsGlobal = true,
-		CanRename = true,
-		References = 1,
-	}
-
-	self:AddGlobal(name, variable)
-	return variable
-end
-
---- Get a global variable
--- @tparam string name The name of the global
--- @treturn ?|Variable The variable
-function Scope:GetGlobal(name)
-	repeat
-		local var = self.GlobalMap[name]
-		if var then return var end
-
-
-		self = self.Parent
-	until not self
-end
-
---- Get a variable by name
--- @tparam string name The name of the variable
--- @treturn ?|Variable The found variable
--- @fixme This is a very inefficient implementation, as with @{Scope:GetLocal} and @{Scope:GetGlocal}
-function Scope:GetVariable(name)
-	return self:GetLocal(name) or self:GetGlobal(name)
-end
-
---- Get all variables in the scope
--- @treturn table A list of @{Variable|variables}
-function Scope:GetAllVariables()
-	return self:getVars(true, self:getVars(true))
-end
-
---- Get all variables
--- @tparam boolean top If this values is the 'top' of the function stack
--- @tparam table ret Table to fill with return values (optional)
--- @treturn table The variables
--- @local
-function Scope:getVars(top, ret)
-	local ret = ret or {}
-	if top then
-		for _, v in pairs(self.Children) do
-			v:getVars(true, ret)
-		end
-	else
-		for _, v in pairs(self.Locals) do
-			table.insert(ret, v)
-		end
-		for _, v in pairs(self.Globals) do
-			table.insert(ret, v)
-		end
-		if self.Parent then
-			self.Parent:getVars(false, ret)
-		end
-	end
-	return ret
-end
-
---- Rename all locals to smaller values
--- @tparam string validNameChars All characters that can be used to make a variable name
--- @fixme Some of the string generation happens a lot, this could be looked at
-function Scope:ObfuscateLocals(validNameChars)
-	-- Use values sorted for letter frequency instead
-	local startChars = validNameChars or "etaoinshrdlucmfwypvbgkqjxz_ETAOINSHRDLUCMFWYPVBGKQJXZ"
-	local otherChars = validNameChars or "etaoinshrdlucmfwypvbgkqjxz_0123456789ETAOINSHRDLUCMFWYPVBGKQJXZ"
-
-	local startCharsLength, otherCharsLength = #startChars, #otherChars
-	local index = 0
-	local floor = math.floor
-	for _, var in pairs(self.Locals) do
-		local name
-
-		repeat
-			if index < startCharsLength then
-				index = index + 1
-				name = startChars:sub(index, index)
-			else
-				if index < startCharsLength then
-					index = index + 1
-					name = startChars:sub(index, index)
-				else
-					local varIndex = floor(index / startCharsLength)
-					local offset = index % startCharsLength
-					name = startChars:sub(offset, offset)
-
-					while varIndex > 0 do
-						offset = varIndex % otherCharsLength
-						name = otherChars:sub(offset, offset) .. name
-						varIndex = floor(varIndex / otherCharsLength)
-					end
-					index = index + 1
-				end
-			end
-		until not (keywords[name] or self:GetVariable(name))
-		self:RenameLocal(var.Name, name)
-	end
-end
-
---- Converts the scope to a string
--- No, it actually just returns '&lt;scope&gt;'
--- @treturn string '&lt;scope&gt;'
-function Scope:ToString()
-	return '<Scope>'
-end
-
---- Create a new scope
--- @tparam Scope parent The parent scope
--- @treturn Scope The created scope
-local function NewScope(parent)
-	local scope = setmetatable({
-		Parent = parent,
-		Locals = {},
-		LocalMap = {},
-		Globals = {},
-		GlobalMap = {},
-		oldLocalNamesMap = {},
-		Children = {},
-	}, { __index = Scope })
-
-	if parent then
-		table.insert(parent.Children, scope)
-	end
-
-	return scope
-end
-
-return NewScope
-end
 preload["howl.lexer.rebuild"] = function(...)
 --- Rebuild source code from an AST
 -- Does not preserve whitespace
@@ -4452,37 +4062,11 @@ local symbols = constants.Symbols
 --- Join two statements together
 -- @tparam string left The left statement
 -- @tparam string right The right statement
--- @tparam string sep The string used to separate the characters
--- @treturn string The joined strings
-local function doJoinStatements(left, right, sep)
-	sep = sep or ' '
-	local leftEnd, rightStart = left:sub(-1, -1), right:sub(1, 1)
-	if upperChars[leftEnd] or lowerChars[leftEnd] or leftEnd == '_' then
-		if not (rightStart == '_' or upperChars[rightStart] or lowerChars[rightStart] or digits[rightStart]) then
-			--rightStart is left symbol, can join without seperation
-			return left .. right
-		else
-			return left .. sep .. right
-		end
-	elseif digits[leftEnd] then
-		if rightStart == '(' then
-			--can join statements directly
-			return left .. right
-		elseif symbols[rightStart] then
-			return left .. right
-		else
-			return left .. sep .. right
-		end
-	elseif leftEnd == '' then
-		return left .. right
-	else
-		if rightStart == '(' then
-			--don't want to accidentally call last statement, can't join directly
-			return left .. sep .. right
-		else
-			return left .. right
-		end
-	end
+-- @treturn string|nil The separator, or nil
+local function get_separator(left, right)
+	local left_end, right_start = left:sub(-1, -1), right:sub(1, 1)
+	if left_end:find("[%w_]") and right_start:find("[%w_]") then return " " end
+	return nil
 end
 
 --- Returns the minified version of an AST. Operations which are performed:
@@ -4494,282 +4078,294 @@ end
 -- @todo Convert to a buffer
 local function minify(ast)
 	local formatStatlist, formatExpr
-	local count = 0
-	local function joinStatements(left, right, sep)
-		if count > 150 then
-			count = 0
-			return left .. "\n" .. right
-		else
-			return doJoinStatements(left, right, sep)
+
+	local out_buf, out_n, line_len = {}, 0, 0
+	local function append(str)
+		if type(str) ~= "string" then error("expected string") end
+
+		local prev = out_buf[out_n]
+		if prev then
+			local sep = get_separator(prev, str)
+			if sep then
+				out_buf[out_n + 1], out_n = sep, out_n + 1
+				line_len = line_len + #sep
+			end
 		end
+
+		if line_len > 80 and line_len + #str > 120 and str:sub(1,1) ~= "(" then
+			out_buf[out_n + 1], out_n = "\n", out_n + 1
+			line_len = 0
+		end
+
+		out_buf[out_n + 1], out_n = str, out_n + 1
+		line_len = line_len + #str
 	end
 
 	formatExpr = function(expr, precedence)
-		local precedence = precedence or 0
-		local currentPrecedence = 0
-		local skipParens = false
-		local out = ""
+		precedence = precedence or 0
 		if expr.AstType == 'VarExpr' then
 			if expr.Variable then
-				out = out .. expr.Variable.Name
+				append(expr.Variable.Name)
 			else
-				out = out .. expr.Name
+				append(expr.Name)
 			end
 
 		elseif expr.AstType == 'NumberExpr' then
-			out = out .. expr.Value.Data
+			append(expr.Value.Data)
 
 		elseif expr.AstType == 'StringExpr' then
-			out = out .. expr.Value.Data
+			append(expr.Value.Data)
 
 		elseif expr.AstType == 'BooleanExpr' then
-			out = out .. tostring(expr.Value)
+			append(tostring(expr.Value))
 
 		elseif expr.AstType == 'NilExpr' then
-			out = joinStatements(out, "nil")
+			append("nil")
 
 		elseif expr.AstType == 'BinopExpr' then
-			currentPrecedence = expr.OperatorPrecedence
-			out = joinStatements(out, formatExpr(expr.Lhs, currentPrecedence))
-			out = joinStatements(out, expr.Op)
-			out = joinStatements(out, formatExpr(expr.Rhs))
+			local currentPrecedence = expr.OperatorPrecedence
+			if currentPrecedence < precedence then
+				append(string.rep('(', expr.ParenCount or 0))
+			end
+
+			formatExpr(expr.Lhs, currentPrecedence)
+			append(expr.Op)
+			formatExpr(expr.Rhs)
 			if expr.Op == '^' or expr.Op == '..' then
 				currentPrecedence = currentPrecedence - 1
 			end
 
 			if currentPrecedence < precedence then
-				skipParens = false
-			else
-				skipParens = true
+				append(string.rep(')', expr.ParenCount or 0))
 			end
 		elseif expr.AstType == 'UnopExpr' then
-			out = joinStatements(out, expr.Op)
-			out = joinStatements(out, formatExpr(expr.Rhs))
+			append(expr.Op)
+			formatExpr(expr.Rhs)
 
 		elseif expr.AstType == 'DotsExpr' then
-			out = out .. "..."
+			append("...")
 
 		elseif expr.AstType == 'CallExpr' then
-			out = out .. formatExpr(expr.Base)
-			out = out .. "("
+			formatExpr(expr.Base)
+			append("(")
 			for i = 1, #expr.Arguments do
-				out = out .. formatExpr(expr.Arguments[i])
-				if i ~= #expr.Arguments then
-					out = out .. ","
-				end
+				formatExpr(expr.Arguments[i])
+				if i ~= #expr.Arguments then append(",") end
 			end
-			out = out .. ")"
+			append(")")
 
 		elseif expr.AstType == 'TableCallExpr' then
-			out = out .. formatExpr(expr.Base)
-			out = out .. formatExpr(expr.Arguments[1])
+			formatExpr(expr.Base)
+			formatExpr(expr.Arguments[1])
 
 		elseif expr.AstType == 'StringCallExpr' then
-			out = out .. formatExpr(expr.Base)
-			out = out .. expr.Arguments[1].Data
+			formatExpr(expr.Base)
+			append(expr.Arguments[1].Data)
 
 		elseif expr.AstType == 'IndexExpr' then
-			out = out .. formatExpr(expr.Base) .. "[" .. formatExpr(expr.Index) .. "]"
+			formatExpr(expr.Base)
+			append("[")
+			formatExpr(expr.Index)
+			append("]")
 
 		elseif expr.AstType == 'MemberExpr' then
-			out = out .. formatExpr(expr.Base) .. expr.Indexer .. expr.Ident.Data
+			formatExpr(expr.Base)
+			append(expr.Indexer)
+			append(expr.Ident.Data)
 
 		elseif expr.AstType == 'Function' then
 			expr.Scope:ObfuscateLocals()
-			out = out .. "function("
+			append("function(")
 			if #expr.Arguments > 0 then
 				for i = 1, #expr.Arguments do
-					out = out .. expr.Arguments[i].Name
+					append(expr.Arguments[i].Name)
 					if i ~= #expr.Arguments then
-						out = out .. ","
+						append(",")
 					elseif expr.VarArg then
-						out = out .. ",..."
+						append(",...")
 					end
 				end
 			elseif expr.VarArg then
-				out = out .. "..."
+				append("...")
 			end
-			out = out .. ")"
-			out = joinStatements(out, formatStatlist(expr.Body))
-			out = joinStatements(out, "end")
+			append(")")
+			formatStatlist(expr.Body)
+			append("end")
 
 		elseif expr.AstType == 'ConstructorExpr' then
-			out = out .. "{"
+			append("{")
 			for i = 1, #expr.EntryList do
 				local entry = expr.EntryList[i]
 				if entry.Type == 'Key' then
-					out = out .. "[" .. formatExpr(entry.Key) .. "]=" .. formatExpr(entry.Value)
+					append("[")
+					formatExpr(entry.Key)
+					append("]=")
+					formatExpr(entry.Value)
 				elseif entry.Type == 'Value' then
-					out = out .. formatExpr(entry.Value)
+					formatExpr(entry.Value)
 				elseif entry.Type == 'KeyString' then
-					out = out .. entry.Key .. "=" .. formatExpr(entry.Value)
+					append(entry.Key)
+					append("=")
+					formatExpr(entry.Value)
 				end
 				if i ~= #expr.EntryList then
-					out = out .. ","
+					append(",")
 				end
 			end
-			out = out .. "}"
+			append("}")
 
 		elseif expr.AstType == 'Parentheses' then
-			out = out .. "(" .. formatExpr(expr.Inner) .. ")"
+			append("(")
+			formatExpr(expr.Inner)
+			append(")")
 		end
-		if not skipParens then
-			out = string.rep('(', expr.ParenCount or 0) .. out
-			out = out .. string.rep(')', expr.ParenCount or 0)
-		end
-		count = count + #out
-		return out
 	end
 
 	local formatStatement = function(statement)
-		local out = ''
 		if statement.AstType == 'AssignmentStatement' then
 			for i = 1, #statement.Lhs do
-				out = out .. formatExpr(statement.Lhs[i])
-				if i ~= #statement.Lhs then
-					out = out .. ","
-				end
+				formatExpr(statement.Lhs[i])
+				if i ~= #statement.Lhs then append(",") end
 			end
 			if #statement.Rhs > 0 then
-				out = out .. "="
+				append("=")
 				for i = 1, #statement.Rhs do
-					out = out .. formatExpr(statement.Rhs[i])
-					if i ~= #statement.Rhs then
-						out = out .. ","
-					end
+					formatExpr(statement.Rhs[i])
+					if i ~= #statement.Rhs then append(",") end
 				end
 			end
 
 		elseif statement.AstType == 'CallStatement' then
-			out = formatExpr(statement.Expression)
+			formatExpr(statement.Expression)
 
 		elseif statement.AstType == 'LocalStatement' then
-			out = out .. "local "
+			append("local ")
 			for i = 1, #statement.LocalList do
-				out = out .. statement.LocalList[i].Name
+				append(statement.LocalList[i].Name)
 				if i ~= #statement.LocalList then
-					out = out .. ","
+					append(",")
 				end
 			end
 			if #statement.InitList > 0 then
-				out = out .. "="
+				append("=")
 				for i = 1, #statement.InitList do
-					out = out .. formatExpr(statement.InitList[i])
-					if i ~= #statement.InitList then
-						out = out .. ","
-					end
+					formatExpr(statement.InitList[i])
+					if i ~= #statement.InitList then append(",") end
 				end
 			end
 
 		elseif statement.AstType == 'IfStatement' then
-			out = joinStatements("if", formatExpr(statement.Clauses[1].Condition))
-			out = joinStatements(out, "then")
-			out = joinStatements(out, formatStatlist(statement.Clauses[1].Body))
+			append("if")
+			formatExpr(statement.Clauses[1].Condition)
+			append("then")
+			formatStatlist(statement.Clauses[1].Body)
 			for i = 2, #statement.Clauses do
 				local st = statement.Clauses[i]
 				if st.Condition then
-					out = joinStatements(out, "elseif")
-					out = joinStatements(out, formatExpr(st.Condition))
-					out = joinStatements(out, "then")
+					append("elseif")
+					formatExpr(st.Condition)
+					append("then")
 				else
-					out = joinStatements(out, "else")
+					append("else")
 				end
-				out = joinStatements(out, formatStatlist(st.Body))
+				formatStatlist(st.Body)
 			end
-			out = joinStatements(out, "end")
+			append("end")
 
 		elseif statement.AstType == 'WhileStatement' then
-			out = joinStatements("while", formatExpr(statement.Condition))
-			out = joinStatements(out, "do")
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "end")
+			append("while")
+			formatExpr(statement.Condition)
+			append("do")
+			formatStatlist(statement.Body)
+			append("end")
 
 		elseif statement.AstType == 'DoStatement' then
-			out = joinStatements(out, "do")
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "end")
+			append("do")
+			formatStatlist(statement.Body)
+			append("end")
 
 		elseif statement.AstType == 'ReturnStatement' then
-			out = "return"
+			append("return")
 			for i = 1, #statement.Arguments do
-				out = joinStatements(out, formatExpr(statement.Arguments[i]))
-				if i ~= #statement.Arguments then
-					out = out .. ","
-				end
+				formatExpr(statement.Arguments[i])
+				if i ~= #statement.Arguments then append(",") end
 			end
 
 		elseif statement.AstType == 'BreakStatement' then
-			out = "break"
+			append("break")
 
 		elseif statement.AstType == 'RepeatStatement' then
-			out = "repeat"
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "until")
-			out = joinStatements(out, formatExpr(statement.Condition))
+			append("repeat")
+			formatStatlist(statement.Body)
+			append("until")
+			formatExpr(statement.Condition)
 
 		elseif statement.AstType == 'Function' then
 			statement.Scope:ObfuscateLocals()
 			if statement.IsLocal then
-				out = "local"
+				append("local")
 			end
-			out = joinStatements(out, "function ")
+			append("function ")
 			if statement.IsLocal then
-				out = out .. statement.Name.Name
+				append(statement.Name.Name)
 			else
-				out = out .. formatExpr(statement.Name)
+				formatExpr(statement.Name)
 			end
-			out = out .. "("
+			append("(")
 			if #statement.Arguments > 0 then
 				for i = 1, #statement.Arguments do
-					out = out .. statement.Arguments[i].Name
+					append(statement.Arguments[i].Name)
 					if i ~= #statement.Arguments then
-						out = out .. ","
+						append(",")
 					elseif statement.VarArg then
-						out = out .. ",..."
+						append(",...")
 					end
 				end
 			elseif statement.VarArg then
-				out = out .. "..."
+				append("...")
 			end
-			out = out .. ")"
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "end")
+			append(")")
+			formatStatlist(statement.Body)
+			append("end")
 
 		elseif statement.AstType == 'GenericForStatement' then
 			statement.Scope:ObfuscateLocals()
-			out = "for "
+			append("for")
 			for i = 1, #statement.VariableList do
-				out = out .. statement.VariableList[i].Name
-				if i ~= #statement.VariableList then
-					out = out .. ","
-				end
+				append(statement.VariableList[i].Name)
+				if i ~= #statement.VariableList then append(",") end
 			end
-			out = out .. " in"
+			append("in")
 			for i = 1, #statement.Generators do
-				out = joinStatements(out, formatExpr(statement.Generators[i]))
-				if i ~= #statement.Generators then
-					out = joinStatements(out, ',')
-				end
+				formatExpr(statement.Generators[i])
+				if i ~= #statement.Generators then append(",") end
 			end
-			out = joinStatements(out, "do")
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "end")
+			append("do")
+			formatStatlist(statement.Body)
+			append("end")
 
 		elseif statement.AstType == 'NumericForStatement' then
 			statement.Scope:ObfuscateLocals()
-			out = "for "
-			out = out .. statement.Variable.Name .. "="
-			out = out .. formatExpr(statement.Start) .. "," .. formatExpr(statement.End)
+			append("for")
+			append(statement.Variable.Name)
+			append("=")
+			formatExpr(statement.Start)
+			append(",")
+			formatExpr(statement.End)
 			if statement.Step then
-				out = out .. "," .. formatExpr(statement.Step)
+				append(",")
+				formatExpr(statement.Step)
 			end
-			out = joinStatements(out, "do")
-			out = joinStatements(out, formatStatlist(statement.Body))
-			out = joinStatements(out, "end")
+			append("do")
+			formatStatlist(statement.Body)
+			append("end")
 		elseif statement.AstType == 'LabelStatement' then
-			out = "::" .. statement.Label .. "::"
+			append("::")
+			append(statement.Label)
+			append("::")
 		elseif statement.AstType == 'GotoStatement' then
-			out = "goto " .. statement.Label
+			append("goto")
+			append(statement.Label)
 		elseif statement.AstType == 'Comment' then
 			-- ignore
 		elseif statement.AstType == 'Eof' then
@@ -4777,20 +4373,17 @@ local function minify(ast)
 		else
 			error("Unknown AST Type: " .. statement.AstType)
 		end
-		count = count + #out
-		return out
 	end
 
 	formatStatlist = function(statList)
-		local out = ''
 		statList.Scope:ObfuscateLocals()
 		for _, stat in pairs(statList.Body) do
-			out = joinStatements(out, formatStatement(stat), ';')
+			formatStatement(stat)
 		end
-		return out
 	end
 
-	return formatStatlist(ast)
+	formatStatlist(ast)
+	return table.concat(out_buf)
 end
 
 --- Minify a string
@@ -6069,6 +5662,441 @@ return {
 	UnOps = createLookup { '-', 'not', '#' },
 }
 end
+preload["howl.lexer.TokenList"] = function(...)
+--- Provides utilities for reading tokens from a 'stream'
+-- @module howl.lexer.TokenList
+
+local min = math.min
+local insert = table.insert
+
+return function(tokens)
+	local n = #tokens
+	local pointer = 1
+
+	--- Get this element in the token list
+	-- @tparam int offset The offset in the token list
+	local function Peek(offset)
+		return tokens[min(n, pointer + (offset or 0))]
+	end
+
+	--- Get the next token in the list
+	-- @tparam table tokenList Add the token onto this table
+	-- @treturn Token The token
+	local function Get(tokenList)
+		local token = tokens[pointer]
+		pointer = min(pointer + 1, n)
+		if tokenList then
+			insert(tokenList, token)
+		end
+		return token
+	end
+
+	--- Check if the next token is of a type
+	-- @tparam string type The type to compare it with
+	-- @treturn bool If the type matches
+	local function Is(type)
+		return Peek().Type == type
+	end
+
+	--- Check if the next token is a symbol and return it
+	-- @tparam string symbol Symbol to check (Optional)
+	-- @tparam table tokenList Add the token onto this table
+	-- @treturn [ 0 ] ?|token If symbol is not specified, return the token
+	-- @treturn [ 1 ] boolean If symbol is specified, return true if it matches
+	local function ConsumeSymbol(symbol, tokenList)
+		local token = Peek()
+		if token.Type == 'Symbol' then
+			if symbol then
+				if token.Data == symbol then
+					if tokenList then insert(tokenList, token) end
+					pointer = pointer + 1
+					return true
+				else
+					return nil
+				end
+			else
+				if tokenList then insert(tokenList, token) end
+				pointer = pointer + 1
+				return token
+			end
+		else
+			return nil
+		end
+	end
+
+	--- Check if the next token is a keyword and return it
+	-- @tparam string kw Keyword to check (Optional)
+	-- @tparam table tokenList Add the token onto this table
+	-- @treturn [ 0 ] ?|token If kw is not specified, return the token
+	-- @treturn [ 1 ] boolean If kw is specified, return true if it matches
+	local function ConsumeKeyword(kw, tokenList)
+		local token = Peek()
+		if token.Type == 'Keyword' and token.Data == kw then
+			if tokenList then insert(tokenList, token) end
+			pointer = pointer + 1
+			return true
+		else
+			return nil
+		end
+	end
+
+	--- Check if the next token matches is a keyword
+	-- @tparam string kw The particular keyword
+	-- @treturn boolean If it matches or not
+	local function IsKeyword(kw)
+		local token = Peek()
+		return token.Type == 'Keyword' and token.Data == kw
+	end
+
+	--- Check if the next token matches is a symbol
+	-- @tparam string symbol The particular symbol
+	-- @treturn boolean If it matches or not
+	local function IsSymbol(symbol)
+		local token = Peek()
+		return token.Type == 'Symbol' and token.Data == symbol
+	end
+
+	--- Check if the next token is an end of file
+	-- @treturn boolean If the next token is an end of file
+	local function IsEof()
+		return Peek().Type == 'Eof'
+	end
+
+	--- Produce a string off all tokens
+	-- @tparam boolean includeLeading Include the leading whitespace
+	-- @treturn string The resulting string
+	local function Print(includeLeading)
+		includeLeading = (includeLeading == nil and true or includeLeading)
+
+		local out = ""
+		for _, token in ipairs(tokens) do
+			if includeLeading then
+				for _, whitespace in ipairs(token.LeadingWhite) do
+					out = out .. whitespace:Print() .. "\n"
+				end
+			end
+			out = out .. token:Print() .. "\n"
+		end
+
+		return out
+	end
+
+	return {
+		Peek = Peek,
+		Get = Get,
+		Is = Is,
+		ConsumeSymbol = ConsumeSymbol,
+		ConsumeKeyword = ConsumeKeyword,
+		IsKeyword = IsKeyword,
+		IsSymbol = IsSymbol,
+		IsEof = IsEof,
+		Print = Print,
+		Tokens = tokens,
+	}
+end
+end
+preload["howl.lexer.Scope"] = function(...)
+--- Holds variables for one scope
+-- This implementation is inefficient. Instead of using hashes,
+-- a linear search is used instead to look up variables
+-- @module howl.lexer.Scope
+
+local keywords = require "howl.lexer.constants".Keywords
+
+--- Holds the data for one variable
+-- @table Variable
+-- @tfield Scope Scope The parent scope
+-- @tfield string Name The name of the variable
+-- @tfield boolean IsGlobal Is the variable global
+-- @tfield boolean CanRename If the variable can be renamed
+-- @tfield int References Number of references
+
+--- Holds variables for one scope
+-- @type Scope
+-- @tfield ?|Scope Parent The parent scope
+-- @tfield table Locals A list of locals variables
+-- @tfield table Globals A list of global variables
+-- @tfield table Children A list of children @{Scope|scopes}
+
+local Scope = {}
+
+--- Add a local to this scope
+-- @tparam Variable variable The local object
+function Scope:AddLocal(name, variable)
+	table.insert(self.Locals, variable)
+	self.LocalMap[name] = variable
+end
+
+--- Create a @{Variable} and add it to the scope
+-- @tparam string name The name of the local
+-- @treturn Variable The created local
+function Scope:CreateLocal(name)
+	local variable = self:GetLocal(name)
+	if variable then return variable end
+
+	variable = {
+		Scope = self,
+		Name = name,
+		IsGlobal = false,
+		CanRename = true,
+		References = 1,
+	}
+
+	self:AddLocal(name, variable)
+	return variable
+end
+
+--- Get a local variable
+-- @tparam string name The name of the local
+-- @treturn ?|Variable The variable
+function Scope:GetLocal(name)
+	repeat
+		local var = self.LocalMap[name]
+		if var then return var end
+
+
+		self = self.Parent
+	until not self
+end
+
+--- Find an local variable by its old name
+-- @tparam string name The old name of the local
+-- @treturn ?|Variable The local variable
+function Scope:GetOldLocal(name)
+	if self.oldLocalNamesMap[name] then
+		return self.oldLocalNamesMap[name]
+	end
+	return self:GetLocal(name)
+end
+
+--- Rename a local variable
+-- @tparam string|Variable oldName The old variable name
+-- @tparam string newName The new variable name
+function Scope:RenameLocal(oldName, newName)
+	oldName = type(oldName) == 'string' and oldName or oldName.Name
+
+	repeat
+		local var = self.LocalMap[oldName]
+		if var then
+			var.Name = newName
+			self.oldLocalNamesMap[oldName] = var
+			self.LocalMap[oldName] = nil
+			self.LocalMap[newName] = var
+			break
+		end
+
+		self = self.Parent
+	until not self
+end
+
+--- Add a global to this scope
+-- @tparam Variable name The name of the global
+function Scope:AddGlobal(name, variable)
+	table.insert(self.Globals, variable)
+	self.GlobalMap[name] = variable
+end
+
+--- Create a @{Variable} and add it to the scope
+-- @tparam string name The name of the global
+-- @treturn Variable The created global
+function Scope:CreateGlobal(name)
+	local variable = self:GetGlobal(name)
+	if variable then return variable end
+
+	variable = {
+		Scope = self,
+		Name = name,
+		IsGlobal = true,
+		CanRename = true,
+		References = 1,
+	}
+
+	self:AddGlobal(name, variable)
+	return variable
+end
+
+--- Get a global variable
+-- @tparam string name The name of the global
+-- @treturn ?|Variable The variable
+function Scope:GetGlobal(name)
+	repeat
+		local var = self.GlobalMap[name]
+		if var then return var end
+
+
+		self = self.Parent
+	until not self
+end
+
+--- Get a variable by name
+-- @tparam string name The name of the variable
+-- @treturn ?|Variable The found variable
+-- @fixme This is a very inefficient implementation, as with @{Scope:GetLocal} and @{Scope:GetGlocal}
+function Scope:GetVariable(name)
+	return self:GetLocal(name) or self:GetGlobal(name)
+end
+
+--- Get all variables in the scope
+-- @treturn table A list of @{Variable|variables}
+function Scope:GetAllVariables()
+	return self:getVars(true, self:getVars(true))
+end
+
+--- Get all variables
+-- @tparam boolean top If this values is the 'top' of the function stack
+-- @tparam table ret Table to fill with return values (optional)
+-- @treturn table The variables
+-- @local
+function Scope:getVars(top, ret)
+	local ret = ret or {}
+	if top then
+		for _, v in pairs(self.Children) do
+			v:getVars(true, ret)
+		end
+	else
+		for _, v in pairs(self.Locals) do
+			table.insert(ret, v)
+		end
+		for _, v in pairs(self.Globals) do
+			table.insert(ret, v)
+		end
+		if self.Parent then
+			self.Parent:getVars(false, ret)
+		end
+	end
+	return ret
+end
+
+--- Rename all locals to smaller values
+-- @tparam string validNameChars All characters that can be used to make a variable name
+-- @fixme Some of the string generation happens a lot, this could be looked at
+function Scope:ObfuscateLocals(validNameChars)
+	-- Use values sorted for letter frequency instead
+	local startChars = validNameChars or "etaoinshrdlucmfwypvbgkqjxz_ETAOINSHRDLUCMFWYPVBGKQJXZ"
+	local otherChars = validNameChars or "etaoinshrdlucmfwypvbgkqjxz_0123456789ETAOINSHRDLUCMFWYPVBGKQJXZ"
+
+	local startCharsLength, otherCharsLength = #startChars, #otherChars
+	local index = 0
+	local floor = math.floor
+	for _, var in pairs(self.Locals) do
+		local name
+
+		repeat
+			if index < startCharsLength then
+				index = index + 1
+				name = startChars:sub(index, index)
+			else
+				if index < startCharsLength then
+					index = index + 1
+					name = startChars:sub(index, index)
+				else
+					local varIndex = floor(index / startCharsLength)
+					local offset = index % startCharsLength
+					name = startChars:sub(offset, offset)
+
+					while varIndex > 0 do
+						offset = varIndex % otherCharsLength
+						name = otherChars:sub(offset, offset) .. name
+						varIndex = floor(varIndex / otherCharsLength)
+					end
+					index = index + 1
+				end
+			end
+		until not (keywords[name] or self:GetVariable(name))
+		self:RenameLocal(var.Name, name)
+	end
+end
+
+--- Converts the scope to a string
+-- No, it actually just returns '&lt;scope&gt;'
+-- @treturn string '&lt;scope&gt;'
+function Scope:ToString()
+	return '<Scope>'
+end
+
+--- Create a new scope
+-- @tparam Scope parent The parent scope
+-- @treturn Scope The created scope
+local function NewScope(parent)
+	local scope = setmetatable({
+		Parent = parent,
+		Locals = {},
+		LocalMap = {},
+		Globals = {},
+		GlobalMap = {},
+		oldLocalNamesMap = {},
+		Children = {},
+	}, { __index = Scope })
+
+	if parent then
+		table.insert(parent.Children, scope)
+	end
+
+	return scope
+end
+
+return NewScope
+end
+preload["howl.files.matcher"] = function(...)
+--- Used to create matchers for particular patterns
+-- @module howl.files.matcher
+
+local utils = require "howl.lib.utils"
+
+-- Matches with * and ?  removed
+local basicMatches = {
+	["^"] = "%^", ["$"] = "%$", ["("] = "%(", [")"] = "%)",
+	["%"] = "%%", ["."] = "%.", ["["] = "%[", ["]"] = "%]",
+	["+"] = "%+", ["-"] = "%-", ["\0"] = "%z",
+}
+
+local wildMatches = {
+	-- ["*"] = "([^\\]+)",
+	-- ["?"] = "([^\\])",
+	["*"] = "(.*)"
+}
+for k,v in pairs(basicMatches) do wildMatches[k] = v end
+
+--- A resulting pattern
+-- @table Pattern
+-- @tfield string tag `pattern` or `normal`
+-- @tfield (Pattern, string)->boolean match Predicate to check if this is a valid item
+
+local function patternAction(self, text) return text:match(self.text) end
+local function textAction(self, text)
+	return self.text == "" or self.text == text or text:sub(1, #self.text + 1) == self.text .. "/"
+end
+local function funcAction(self, text) return self.func(text) end
+
+--- Create a matcher
+-- @tparam string|function pattern Pattern to check against
+-- @treturn Pattern
+local function createMatcher(pattern)
+	local t = type(pattern)
+	if t == "string" then
+		local remainder = utils.startsWith(pattern, "pattern:") or utils.startsWith(pattern, "ptrn:")
+		if remainder then
+			return { tag = "pattern", text = remainder, match = patternAction }
+		end
+
+		if pattern:find("%*") then
+			local pattern = "^" .. pattern:gsub(".", wildMatches) .. "$"
+			return { tag = "pattern", text = pattern, match = patternAction }
+		end
+
+		return { tag = "text", text = pattern, match = textAction}
+	elseif t == "function" or (t == "table" and (getmetatable(pattern) or {}).__call) then
+		return { tag = "function", func = pattern, match = funcAction }
+	else
+		error("Expected string or function")
+	end
+end
+
+
+return {
+	createMatcher = createMatcher,
+}
+end
 preload["howl.files.Source"] = function(...)
 --- A source location for a series of files.
 -- This holds a list of inclusion and exclusion filters.
@@ -6274,66 +6302,6 @@ function Source:buildFile(path, relative)
 end
 
 return Source
-end
-preload["howl.files.matcher"] = function(...)
---- Used to create matchers for particular patterns
--- @module howl.files.matcher
-
-local utils = require "howl.lib.utils"
-
--- Matches with * and ?  removed
-local basicMatches = {
-	["^"] = "%^", ["$"] = "%$", ["("] = "%(", [")"] = "%)",
-	["%"] = "%%", ["."] = "%.", ["["] = "%[", ["]"] = "%]",
-	["+"] = "%+", ["-"] = "%-", ["\0"] = "%z",
-}
-
-local wildMatches = {
-	-- ["*"] = "([^\\]+)",
-	-- ["?"] = "([^\\])",
-	["*"] = "(.*)"
-}
-for k,v in pairs(basicMatches) do wildMatches[k] = v end
-
---- A resulting pattern
--- @table Pattern
--- @tfield string tag `pattern` or `normal`
--- @tfield (Pattern, string)->boolean match Predicate to check if this is a valid item
-
-local function patternAction(self, text) return text:match(self.text) end
-local function textAction(self, text)
-	return self.text == "" or self.text == text or text:sub(1, #self.text + 1) == self.text .. "/"
-end
-local function funcAction(self, text) return self.func(text) end
-
---- Create a matcher
--- @tparam string|function pattern Pattern to check against
--- @treturn Pattern
-local function createMatcher(pattern)
-	local t = type(pattern)
-	if t == "string" then
-		local remainder = utils.startsWith(pattern, "pattern:") or utils.startsWith(pattern, "ptrn:")
-		if remainder then
-			return { tag = "pattern", text = remainder, match = patternAction }
-		end
-
-		if pattern:find("%*") then
-			local pattern = "^" .. pattern:gsub(".", wildMatches) .. "$"
-			return { tag = "pattern", text = pattern, match = patternAction }
-		end
-
-		return { tag = "text", text = pattern, match = textAction}
-	elseif t == "function" or (t == "table" and (getmetatable(pattern) or {}).__call) then
-		return { tag = "function", func = pattern, match = funcAction }
-	else
-		error("Expected string or function")
-	end
-end
-
-
-return {
-	createMatcher = createMatcher,
-}
 end
 preload["howl.files.CopySource"] = function(...)
 --- A source location for a series of files.
@@ -6928,10 +6896,4 @@ return function(name, super)
 	return super and super:subclass(name) or _includeMixin(_createClass(name), DefaultMixin)
 end
 end
-if not shell or type(... or nil) == 'table' then
-local tbl = ... or {}
-tbl.require = require tbl.preload = preload
-return tbl
-else
 return preload["howl.cli"](...)
-end
