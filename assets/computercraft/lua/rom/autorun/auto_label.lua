@@ -24,7 +24,7 @@ local function genLabel()
 		_type = "T"
 	elseif pocket then -- pocketPC?
 		_type = "P"
-	elseif select(2, term.getSize()) == 13 then -- plethora neural interface?
+	elseif select(2, term.getSize()) == 13 then -- plethora neural interface? -- TODO: term sizes can change now, need to find a better way to do this. peripheral.find("neuralInterface") has been suggested but it doen't work if the neural interface has no other modules in it
 		advance = "N" -- neural interfaces can only be advanced, and, as funny as 'AI' would be, that would be confusing if someone manages to make an AI in CC
 		_type = "I"
 	else -- must be normal computer
