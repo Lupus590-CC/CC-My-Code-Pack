@@ -51,7 +51,7 @@ if args[1] == nil then
 	if os.getComputerLabel() == nil then
 		genLabel()
 	end
-elseif args[1] == "f" or args[1] == "F" then
+elseif type(args[1]) == "string" and (args[1]:upper() == "--FORCE" or args[1]:upper() == "-F" or args[1]:upper() == "F") then
 	-- force a re-gen
 	genLabel()
 	print("Label set to "..os.getComputerLabel())
